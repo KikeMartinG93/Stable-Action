@@ -129,7 +129,12 @@ struct ContentView: View {
                 .padding()
             }
         }
-        .onAppear  { camera.start(); motion.start() }
+        .onAppear  {
+            // Give CameraManager access to live roll angle for crop recording
+            camera.rollProvider = { [weak motion] in motion?.roll ?? 0.0 }
+            camera.start()
+            motion.start()
+        }
         .onDisappear { camera.stop(); motion.stop() }
         .fullScreenCover(isPresented: $showingPlayer) {
             if let url = camera.lastVideoURL {

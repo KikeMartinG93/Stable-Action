@@ -7,63 +7,83 @@
 
 import AVFoundation
 import Combine
+import CoreImage
 import Photos
-import UniformTypeIdentifiers
+import UIKit
 
 final class CameraManager: NSObject, ObservableObject {
 
-    enum CameraType {
-        case wide
-        case ultraWide
-        case telephoto
-    }
+    enum CameraType { case wide, ultraWide, telephoto }
 
-    // Preferred camera type (defaults to ultra‑wide if available)
     @Published var cameraType: CameraType = .ultraWide {
-        didSet {
-            // Reconfigure the video input when the preference changes
-            sessionQueue.async { [weak self] in
-                self?.reconfigureVideoInput()
-            }
-        }
+        didSet { sessionQueue.async { [weak self] in self?.reconfigureVideoInput() } }
     }
 
     // MARK: - Session
+
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private var isConfigured = false
 
-    // MARK: - Inputs / Outputs
+    // MARK: - Inputs
+
     private var videoDeviceInput: AVCaptureDeviceInput?
     private var audioDeviceInput: AVCaptureDeviceInput?
-    private let movieOutput = AVCaptureMovieFileOutput()
+
+    // MARK: - Data outputs (replace MovieFileOutput)
+
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let audioDataOutput = AVCaptureAudioDataOutput()
+    /// Dedicated high-priority queue for frame callbacks
+    private let dataOutputQueue = DispatchQueue(label: "camera.data.output",
+                                                qos: .userInteractive)
+
+    // MARK: - Asset writer (recording pipeline)
+    // All properties below are accessed exclusively on dataOutputQueue (serial queue) — safe.
+
+    nonisolated(unsafe) private var assetWriter: AVAssetWriter?
+    nonisolated(unsafe) private var videoWriterInput: AVAssetWriterInput?
+    nonisolated(unsafe) private var audioWriterInput: AVAssetWriterInput?
+    nonisolated(unsafe) private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    nonisolated(unsafe) private var recordingURL: URL?
+    nonisolated(unsafe) private var sessionAtSourceTime = false
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     // MARK: - Published state
+
     @Published var permissionDenied = false
     @Published var isRecording = false
-    @Published var lastVideoURL: URL? = nil
+    @Published var lastVideoURL: URL?
 
-    /// When true, Cinematic Video Stabilization (Action Mode equivalent) is applied
+    /// Nonisolated mirror of isRecording for use on the data-output queue.
+    nonisolated(unsafe) private var isRecordingFlag = false
+
     @Published var actionModeEnabled = false {
         didSet { sessionQueue.async { self.applyStabilization() } }
     }
 
-    // Temp file URL for the current recording
-    private var currentRecordingURL: URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mov")
-    }
+    // MARK: - Roll provider
+
+    /// Read on every video frame — must be nonisolated(unsafe) so the
+    /// data-output queue can call it without actor-hop overhead.
+    nonisolated(unsafe) var rollProvider: () -> Double = { 0.0 }
+
+    // ── Crop geometry constants ────────────────────────────────────────
+    // Must match HorizonRectangleView sizing.
+    // For a 3:4 rect whose diagonal fits inside the shorter sensor dimension
+    // with a 10% inset: W = min(sensorW,sensorH) × 3/5 × 0.90
+    private let cropFraction: Double = 3.0 / 5.0 * 0.90
+    private let cropAspectW: Double = 3.0
+    private let cropAspectH: Double = 4.0
 
     // MARK: - Lifecycle
 
     func start() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            checkMicThenStart()
+        case .authorized:           checkMicThenStart()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                if granted { self?.checkMicThenStart() }
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] ok in
+                if ok { self?.checkMicThenStart() }
                 else { DispatchQueue.main.async { self?.permissionDenied = true } }
             }
         default:
@@ -73,12 +93,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func checkMicThenStart() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            startSession()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in self?.startSession() }
-        default:
-            startSession() // start without mic if denied
+        case .authorized:       startSession()
+        case .notDetermined:    AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in self?.startSession() }
+        default:                startSession()
         }
     }
 
@@ -86,14 +103,14 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if !self.isConfigured { self.configureSession() }
-            if !self.session.isRunning { self.session.startRunning() }
+            if !self.session.isRunning  { self.session.startRunning() }
         }
     }
 
     func stop() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            if self.isRecording { self.movieOutput.stopRecording() }
+            if self.isRecording { self.stopRecording() }
             if self.session.isRunning { self.session.stopRunning() }
         }
     }
@@ -105,229 +122,323 @@ final class CameraManager: NSObject, ObservableObject {
         session.sessionPreset = .inputPriority
         defer { session.commitConfiguration(); isConfigured = true }
 
-        // Video input (prefer current camera type, fallback handled in helper)
-        guard let videoDevice = selectVideoDevice(for: cameraType, position: .back),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
-              session.canAddInput(videoInput) else { return }
-        session.addInput(videoInput)
-        videoDeviceInput = videoInput
+        // ── Video input ───────────────────────────────────────────────
+        guard let device = selectVideoDevice(for: cameraType, position: .back),
+              let input  = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else { return }
+        session.addInput(input)
+        videoDeviceInput = input
 
-        // Enable continuous autofocus & auto-exposure from the start
-        do {
-            try videoDevice.lockForConfiguration()
-            if videoDevice.isFocusModeSupported(.continuousAutoFocus) {
-                videoDevice.focusMode = .continuousAutoFocus
-            }
-            if videoDevice.isExposureModeSupported(.continuousAutoExposure) {
-                videoDevice.exposureMode = .continuousAutoExposure
-            }
-            videoDevice.unlockForConfiguration()
-        } catch {
-            print("Initial focus config error:", error)
+        // Continuous AF / AE
+        try? device.lockForConfiguration()
+        if device.isFocusModeSupported(.continuousAutoFocus) {
+            device.focusMode = .continuousAutoFocus
         }
+        if device.isExposureModeSupported(.continuousAutoExposure) {
+            device.exposureMode = .continuousAutoExposure
+        }
+        device.unlockForConfiguration()
 
         enforceFourByThreeAndMinZoom()
 
-        // Audio input
-        if let audioDevice = AVCaptureDevice.default(for: .audio),
-           let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
-           session.canAddInput(audioInput) {
-            session.addInput(audioInput)
-            audioDeviceInput = audioInput
+        // ── Audio input ───────────────────────────────────────────────
+        if let mic = AVCaptureDevice.default(for: .audio),
+           let micInput = try? AVCaptureDeviceInput(device: mic),
+           session.canAddInput(micInput) {
+            session.addInput(micInput)
+            audioDeviceInput = micInput
         }
 
-        // Movie output
-        guard session.canAddOutput(movieOutput) else { return }
-        session.addOutput(movieOutput)
+        // ── Video data output ─────────────────────────────────────────
+        videoDataOutput.alwaysDiscardsLateVideoFrames = false
+        videoDataOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        videoDataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
+        guard session.canAddOutput(videoDataOutput) else { return }
+        session.addOutput(videoDataOutput)
 
-        // Initial stabilization
+        // ── Audio data output ─────────────────────────────────────────
+        audioDataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
+        if session.canAddOutput(audioDataOutput) {
+            session.addOutput(audioDataOutput)
+        }
+
         applyStabilization()
     }
 
     private func applyStabilization() {
-        guard let connection = movieOutput.connection(with: .video) else { return }
-
-        if actionModeEnabled {
-            if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .cinematicExtendedEnhanced
-            }
-        } else {
-            if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .auto
-            }
+        guard let conn = videoDataOutput.connection(with: .video) else { return }
+        if conn.isVideoStabilizationSupported {
+            conn.preferredVideoStabilizationMode = actionModeEnabled
+                ? .cinematicExtendedEnhanced
+                : .auto
         }
-        // Keep session preset at .inputPriority to honor 4:3 activeFormat
         session.sessionPreset = .inputPriority
     }
 
-    // Select a video device for a given camera type and position, with sensible fallbacks
-    private func selectVideoDevice(for type: CameraType, position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+    // MARK: - Device selection
+
+    private func selectVideoDevice(for type: CameraType,
+                                   position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         switch type {
         case .ultraWide:
-            if let d = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position) {
-                return d
-            }
-            // Fallback to wide if ultra‑wide isn't available
-            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-
+            return AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: position)
+                ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
         case .telephoto:
-            if let d = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: position) {
-                return d
-            }
-            // Fallback to wide if telephoto isn't available
-            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
-
+            return AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: position)
+                ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
         case .wide:
             return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
         }
     }
 
-    // Pick the highest-resolution 4:3 video format supported by the device
+    // MARK: - 4:3 format
+
     private func best4by3Format(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
-        let target: Double = 4.0 / 3.0
+        let target = 4.0 / 3.0
         var best: AVCaptureDevice.Format?
-        var bestWidth: Int32 = 0
-
-        for format in device.formats {
-            let desc = format.formatDescription
-            let dims = CMVideoFormatDescriptionGetDimensions(desc)
-            let w = dims.width
-            let h = dims.height
-            if w == 0 || h == 0 { continue }
-            let ratio = Double(w) / Double(h)
-            if abs(ratio - target) > 0.01 { continue }
-
-            // Prefer formats that can run at >= 30 fps
-            let supports30 = format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 30.0 }
-            if !supports30 { continue }
-
-            if w > bestWidth {
-                best = format
-                bestWidth = w
-            }
+        var bestW: Int32 = 0
+        for fmt in device.formats {
+            let d = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+            guard d.width > 0, d.height > 0 else { continue }
+            guard abs(Double(d.width)/Double(d.height) - target) < 0.01 else { continue }
+            guard fmt.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= 30 }) else { continue }
+            if d.width > bestW { best = fmt; bestW = d.width }
         }
         return best
     }
 
-    // Enforce 4:3 aspect by selecting an appropriate activeFormat and zoom out fully
     private func enforceFourByThreeAndMinZoom() {
         guard let device = videoDeviceInput?.device else { return }
-        // Use inputPriority so the device's activeFormat takes precedence
         session.sessionPreset = .inputPriority
-
         do {
             try device.lockForConfiguration()
-
-            if let format = best4by3Format(for: device) {
-                device.activeFormat = format
-                // Aim for 30 fps when possible
-                let desiredFPS: Double = 30.0
-                if format.videoSupportedFrameRateRanges.contains(where: { $0.maxFrameRate >= desiredFPS }) {
-                    let frameDuration = CMTime(value: 1, timescale: CMTimeScale(desiredFPS))
-                    device.activeVideoMinFrameDuration = frameDuration
-                    device.activeVideoMaxFrameDuration = frameDuration
-                }
+            if let fmt = best4by3Format(for: device) {
+                device.activeFormat = fmt
+                let dur = CMTime(value: 1, timescale: 30)
+                device.activeVideoMinFrameDuration = dur
+                device.activeVideoMaxFrameDuration = dur
             }
-
             if #available(iOS 17.0, *) {
                 device.videoZoomFactor = max(1.0, device.minAvailableVideoZoomFactor)
             } else {
                 device.videoZoomFactor = 1.0
             }
-
             device.unlockForConfiguration()
-        } catch {
-            print("4:3/zoom config error:", error)
-        }
+        } catch { print("4:3 config error:", error) }
     }
 
-    // Reconfigure only the video input to switch lenses at runtime
     private func reconfigureVideoInput() {
         session.beginConfiguration()
-
-        if let currentVideoInput = videoDeviceInput {
-            session.removeInput(currentVideoInput)
-            videoDeviceInput = nil
-        }
-
-        if let device = selectVideoDevice(for: cameraType, position: .back),
-           let input = try? AVCaptureDeviceInput(device: device),
-           session.canAddInput(input) {
-            session.addInput(input)
-            videoDeviceInput = input
-            // Enforce 4:3 aspect and minimum zoom for the new lens
+        if let old = videoDeviceInput { session.removeInput(old); videoDeviceInput = nil }
+        if let dev = selectVideoDevice(for: cameraType, position: .back),
+           let inp = try? AVCaptureDeviceInput(device: dev),
+           session.canAddInput(inp) {
+            session.addInput(inp); videoDeviceInput = inp
             enforceFourByThreeAndMinZoom()
         }
-
         session.commitConfiguration()
-
-        // Update stabilization settings for the new connection
         applyStabilization()
     }
 
-    /// Public API to change camera type from UI code
     func setCameraType(_ type: CameraType) {
-        // Update on main to publish change, actual reconfiguration happens on sessionQueue via didSet
-        DispatchQueue.main.async { [weak self] in
-            self?.cameraType = type
-        }
+        DispatchQueue.main.async { self.cameraType = type }
     }
 
-    // MARK: - Focus & Exposure
+    // MARK: - Focus
 
-    /// `point` is in camera device coordinates (0,0)–(1,1)
     func focusAt(point: CGPoint) {
         sessionQueue.async { [weak self] in
-            guard let self,
-                  let device = self.videoDeviceInput?.device else { return }
-            do {
-                try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported {
-                    device.focusPointOfInterest = point
-                    device.focusMode = .autoFocus
-                }
-                if device.isExposurePointOfInterestSupported {
-                    device.exposurePointOfInterest = point
-                    device.exposureMode = .autoExpose
-                }
-                device.unlockForConfiguration()
-            } catch {
-                print("Focus error:", error)
+            guard let self, let dev = self.videoDeviceInput?.device else { return }
+            try? dev.lockForConfiguration()
+            if dev.isFocusPointOfInterestSupported {
+                dev.focusPointOfInterest = point; dev.focusMode = .autoFocus
             }
+            if dev.isExposurePointOfInterestSupported {
+                dev.exposurePointOfInterest = point; dev.exposureMode = .autoExpose
+            }
+            dev.unlockForConfiguration()
 
-            // After lock settles, restore continuous autofocus
             DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self,
-                      let device = self.videoDeviceInput?.device else { return }
-                do {
-                    try device.lockForConfiguration()
-                    if device.isFocusModeSupported(.continuousAutoFocus) {
-                        device.focusMode = .continuousAutoFocus
-                    }
-                    if device.isExposureModeSupported(.continuousAutoExposure) {
-                        device.exposureMode = .continuousAutoExposure
-                    }
-                    device.unlockForConfiguration()
-                } catch {
-                    print("Restore focus error:", error)
+                guard let self, let dev = self.videoDeviceInput?.device else { return }
+                try? dev.lockForConfiguration()
+                if dev.isFocusModeSupported(.continuousAutoFocus)   { dev.focusMode   = .continuousAutoFocus }
+                if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
+                dev.unlockForConfiguration()
+            }
+        }
+    }
+
+    // MARK: - Recording  ─────────────────────────────────────────────────
+
+    func toggleRecording() {
+        // Use isRecordingFlag (nonisolated) — safe to call from any queue/actor.
+        if isRecordingFlag {
+            dataOutputQueue.async { self.stopRecording() }
+        } else {
+            // videoDeviceInput lives on sessionQueue — read it there, then
+            // arm the writer on dataOutputQueue.
+            sessionQueue.async {
+                guard let device = self.videoDeviceInput?.device else {
+                    print("toggleRecording: no videoDeviceInput"); return
+                }
+                let dims = CMVideoFormatDescriptionGetDimensions(
+                    device.activeFormat.formatDescription)
+                // Sensor is landscape, e.g. 4032×3024.
+                // After .oriented(.right) the frame becomes portrait: W=3024, H=4032.
+                // min(W,H) == 3024 → use that as "shorter".
+                let sensorShort = Double(min(dims.width, dims.height))
+                let cropW_d = sensorShort * self.cropFraction
+                let cropH_d = cropW_d * (self.cropAspectH / self.cropAspectW)
+                let outW = max(2, Int(cropW_d) & ~1)
+                let outH = max(2, Int(cropH_d) & ~1)
+
+                self.dataOutputQueue.async {
+                    self.startRecording(outW: outW, outH: outH)
                 }
             }
         }
     }
 
-    // MARK: - Recording
+    private func startRecording(outW: Int, outH: Int) {
+        guard outW > 0, outH > 0 else { return }
 
-    func toggleRecording() {
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if self.movieOutput.isRecording {
-                self.movieOutput.stopRecording()
-            } else {
-                let url = self.currentRecordingURL
-                self.movieOutput.startRecording(to: url, recordingDelegate: self)
-                DispatchQueue.main.async { self.isRecording = true }
-            }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+
+        guard let writer = try? AVAssetWriter(url: url, fileType: .mov) else {
+            print("Could not create AVAssetWriter"); return
         }
+
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey:  AVVideoCodecType.h264,
+            AVVideoWidthKey:  outW,
+            AVVideoHeightKey: outH,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey:      10_000_000,
+                AVVideoMaxKeyFrameIntervalKey: 30
+            ]
+        ]
+        let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        vInput.expectsMediaDataInRealTime = true
+        vInput.transform = .identity  // CIImage pipeline handles orientation
+
+        let adaptorAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey           as String: outW,
+            kCVPixelBufferHeightKey          as String: outH
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: vInput,
+            sourcePixelBufferAttributes: adaptorAttrs)
+
+        let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+        aInput.expectsMediaDataInRealTime = true
+
+        if writer.canAdd(vInput) { writer.add(vInput) }
+        if writer.canAdd(aInput) { writer.add(aInput) }
+
+        guard writer.startWriting() else {
+            print("AssetWriter failed to start:", writer.error as Any); return
+        }
+
+        assetWriter         = writer
+        videoWriterInput    = vInput
+        audioWriterInput    = aInput
+        pixelBufferAdaptor  = adaptor
+        recordingURL        = url
+        sessionAtSourceTime = false
+        isRecordingFlag     = true
+
+        DispatchQueue.main.async { self.isRecording = true }
+    }
+
+    private func stopRecording() {
+        guard isRecordingFlag, let writer = assetWriter else { return }
+
+        isRecordingFlag    = false
+        assetWriter        = nil
+        videoWriterInput   = nil
+        audioWriterInput   = nil
+        pixelBufferAdaptor = nil
+
+        DispatchQueue.main.async { self.isRecording = false }
+
+        let url = recordingURL
+        writer.finishWriting {
+            guard let url else { return }
+            DispatchQueue.main.async { self.lastVideoURL = url }
+            self.saveVideoToLibrary(url: url)
+        }
+    }
+
+    // MARK: - Frame processing  ──────────────────────────────────────────
+
+    nonisolated private func processVideoFrame(_ sampleBuffer: CMSampleBuffer) {
+        guard let writer  = assetWriter,
+              let vInput  = videoWriterInput,
+              let adaptor = pixelBufferAdaptor,
+              writer.status == .writing,
+              vInput.isReadyForMoreMediaData else { return }
+
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        if !sessionAtSourceTime {
+            writer.startSession(atSourceTime: pts)
+            sessionAtSourceTime = true
+        }
+
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // ── Step 1: rotate sensor frame to portrait ───────────────────
+        // Back camera delivers landscape buffers; .right = 90° CW → portrait.
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+        let pW: CGFloat = ciImage.extent.width
+        let pH: CGFloat = ciImage.extent.height
+
+        // ── Step 2: counter-rotate by -roll around centre ─────────────
+        let angle = CGFloat(-rollProvider())
+        let cx: CGFloat = pW / 2
+        let cy: CGFloat = pH / 2
+
+        let centreRotation = CGAffineTransform(translationX: -cx, y: -cy)
+            .concatenating(CGAffineTransform(rotationAngle: angle))
+            .concatenating(CGAffineTransform(translationX:  cx, y:  cy))
+        let rotated = ciImage.transformed(by: centreRotation)
+
+        // ── Step 3: centre-crop to 3:4 portrait rect ─────────────────
+        let shorter: CGFloat = min(pW, pH)
+        let cropW: CGFloat   = shorter * CGFloat(cropFraction)
+        let cropH: CGFloat   = cropW   * CGFloat(cropAspectH / cropAspectW)
+
+        let cropRect = CGRect(
+            x: cx - cropW / 2,
+            y: cy - cropH / 2,
+            width:  cropW,
+            height: cropH
+        ).integral
+
+        let cropped = rotated
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -cropRect.minX,
+                                               y:            -cropRect.minY))
+
+        // ── Step 4: render to pixel buffer and write ──────────────────
+        guard let pool = adaptor.pixelBufferPool else { return }
+        var outBuffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outBuffer) == kCVReturnSuccess,
+              let destBuffer = outBuffer else { return }
+
+        let renderW = Int(cropRect.width)  & ~1
+        let renderH = Int(cropRect.height) & ~1
+        ciContext.render(cropped,
+                         to: destBuffer,
+                         bounds: CGRect(x: 0, y: 0, width: renderW, height: renderH),
+                         colorSpace: CGColorSpaceCreateDeviceRGB())
+
+        adaptor.append(destBuffer, withPresentationTime: pts)
     }
 
     // MARK: - Save to Photos
@@ -338,38 +449,38 @@ final class CameraManager: NSObject, ObservableObject {
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
             } completionHandler: { _, error in
                 if let error { print("Video save error:", error) }
-                try? FileManager.default.removeItem(at: url)
             }
         }
-
         switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
-        case .authorized, .limited:
-            save()
+        case .authorized, .limited: save()
         case .notDetermined:
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-                if status == .authorized || status == .limited { save() }
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { s in
+                if s == .authorized || s == .limited { save() }
             }
         default: break
         }
     }
 }
 
-// MARK: - AVCaptureFileOutputRecordingDelegate
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate + Audio
 
-extension CameraManager: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(_ output: AVCaptureFileOutput,
-                    didFinishRecordingTo outputFileURL: URL,
-                    from connections: [AVCaptureConnection],
-                    error: Error?) {
-        DispatchQueue.main.async {
-            self.isRecording = false
-            if error == nil {
-                self.lastVideoURL = outputFileURL
-                self.saveVideoToLibrary(url: outputFileURL)
-            } else {
-                print("Recording error:", error!)
-            }
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate,
+                          AVCaptureAudioDataOutputSampleBufferDelegate {
+
+    nonisolated func captureOutput(_ output: AVCaptureOutput,
+                                   didOutput sampleBuffer: CMSampleBuffer,
+                                   from connection: AVCaptureConnection) {
+        if output is AVCaptureVideoDataOutput {
+            guard isRecordingFlag else { return }
+            processVideoFrame(sampleBuffer)
+        } else if output is AVCaptureAudioDataOutput {
+            guard isRecordingFlag,
+                  let writer = assetWriter,
+                  let aInput = audioWriterInput,
+                  writer.status == .writing,
+                  sessionAtSourceTime,
+                  aInput.isReadyForMoreMediaData else { return }
+            aInput.append(sampleBuffer)
         }
     }
 }
-
