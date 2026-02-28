@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Samsung Super Steady Horizon Lock - rebuilt for iPhone.</strong><br/>
-  Samsung's Galaxy S25 Ultra has it. Now iOS does too.
+  Samsung's Galaxy S26 Ultra has it. Now iOS does too.
 </p>
 
 <p align="center">
@@ -24,15 +24,15 @@
 
 ## Overview
 
-Samsung's Galaxy S25 Ultra ships a feature called **Super Steady with Horizon Lock** that keeps your footage perfectly level no matter how much you tilt or shake the phone. It's one of the most impressive stabilisation tricks in mobile cameras right now - and it was exclusive to Android.
+Samsung's Galaxy S26 Ultra ships a feature called **Super Steady with Horizon Lock** that keeps your footage perfectly level no matter how much you tilt or shake the phone. It's one of the most impressive stabilisation tricks in mobile cameras right now - and it was exclusive to Android.
 
-**Stable Action brings that exact same experience to iOS.** Point it at anything, tilt your wrist, run, jump, ride - the horizon stays locked flat, just like on the S25 Ultra. Built entirely in native Swift, runs 100% on-device, no subscriptions, no cloud.
+**Stable Action brings that exact same experience to iOS.** Point it at anything, tilt your wrist, run, jump, ride - the horizon stays locked flat, just like on the S26 Ultra. Built entirely in native Swift, runs 100% on-device, no subscriptions, no cloud.
 
 ---
 
 ## Inspired by Samsung Super Steady Horizon Lock
 
-The Galaxy S25 Ultra's Horizon Lock works by cropping into the sensor and counter-rotating that crop window against the phone's tilt in real time. The result is a video where the horizon never moves, even when the phone is spinning in your hand.
+The Galaxy S26 Ultra's Horizon Lock works by cropping into the sensor and counter-rotating that crop window against the phone's tilt in real time. The result is a video where the horizon never moves, even when the phone is spinning in your hand.
 
 Stable Action replicates this using the exact same principle - gyroscope-driven counter-rotation, a floating crop window inside a larger sensor buffer, and hardware ISP stabilisation layered on top. It also adds **translation correction** (up/down/left/right drift compensation) that Samsung's version doesn't publicly advertise.
 
@@ -122,5 +122,5 @@ Designed and built by **[Rudra Shah](https://rudrahsha.in)**
 ---
 
 <p align="center">
-  <sub>Built for iPhone · Inspired by Samsung Galaxy S25 Ultra Super Steady Horizon Lock</sub>
+  <sub>Built for iPhone · Inspired by Samsung Galaxy S26 Ultra Super Steady Horizon Lock</sub>
 </p>
