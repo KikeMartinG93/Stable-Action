@@ -68,6 +68,13 @@ final class CameraManager: NSObject, ObservableObject {
     /// data-output queue can call it without actor-hop overhead.
     nonisolated(unsafe) var rollProvider: () -> Double = { 0.0 }
 
+    // MARK: - Preview frame handler
+
+    /// Called on the data-output queue with every processed frame (rotate + roll-crop),
+    /// regardless of whether recording is active. CameraPreview2 sets this to render
+    /// a live preview of exactly the crop region that will be recorded.
+    nonisolated(unsafe) var previewFrameHandler: ((CIImage) -> Void)? = nil
+
     // ── Crop geometry constants ────────────────────────────────────────
     // Must match HorizonRectangleView sizing.
     // For a 3:4 rect whose diagonal fits inside the shorter sensor dimension

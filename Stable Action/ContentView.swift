@@ -23,24 +23,25 @@ struct ContentView: View {
             VStack(spacing: 0) {
 
                 ZStack {
-                    CameraPreview(session: camera.session) { viewPoint, devicePoint in
+                    // Horizon-locked crop preview — shows exactly what will be recorded.
+                    CameraPreview2(session: camera.session) { viewPoint, devicePoint in
                         focusPoint = viewPoint
                         focusID = UUID()
                         focusVisible = true
                         camera.focusAt(point: devicePoint)
                     }
 
-                    // Focus square overlay
-                    if focusVisible, let pt = focusPoint {
-                        FocusSquare(onFinished: { focusVisible = false })
-                            .id(focusID)
-                            .position(pt)
-                            .allowsHitTesting(false)
-                    }
-
-                    // Horizon-stable 4:3 rectangle in the centre
-                    HorizonRectangleView(motion: motion)
-                        .allowsHitTesting(false)
+                        // Overlays stay on top
+                        if focusVisible, let pt = focusPoint {
+                            FocusSquare(onFinished: { focusVisible = false })
+                                .id(focusID)
+                                .position(pt)
+                                .allowsHitTesting(false)
+                        }
+                        
+                    //TODO: IF YOU WANT TO SEE ROLL-BASED HORIZON LINE, UNCOMMENT THIS (BELOW)
+//                      HorizonRectangleView(motion: motion)
+//                            .allowsHitTesting(false)
 
                     // Recording indicator
                     if camera.isRecording {
@@ -71,6 +72,9 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .animation(.easeInOut(duration: 0.25), value: camera.isRecording)
+                    
+                    
+                    
 
                 // ── Bottom controls ────────────────────────────────────────
                 VStack(spacing: 16) {
