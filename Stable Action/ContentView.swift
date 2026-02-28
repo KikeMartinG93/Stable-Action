@@ -24,7 +24,7 @@ struct ContentView: View {
 
                 ZStack {
                     // Horizon-locked crop preview — shows exactly what will be recorded.
-                    CameraPreview2(session: camera.session) { viewPoint, devicePoint in
+                    CameraPreview2(camera: camera) { viewPoint, devicePoint in
                         focusPoint = viewPoint
                         focusID = UUID()
                         focusVisible = true

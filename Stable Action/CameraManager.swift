@@ -30,16 +30,13 @@ final class CameraManager: NSObject, ObservableObject {
     private var videoDeviceInput: AVCaptureDeviceInput?
     private var audioDeviceInput: AVCaptureDeviceInput?
 
-    // MARK: - Data outputs (replace MovieFileOutput)
+    // MARK: - Data outputs
 
     private let videoDataOutput = AVCaptureVideoDataOutput()
     private let audioDataOutput = AVCaptureAudioDataOutput()
-    /// Dedicated high-priority queue for frame callbacks
-    private let dataOutputQueue = DispatchQueue(label: "camera.data.output",
-                                                qos: .userInteractive)
+    private let dataOutputQueue = DispatchQueue(label: "camera.data.output", qos: .userInteractive)
 
-    // MARK: - Asset writer (recording pipeline)
-    // All properties below are accessed exclusively on dataOutputQueue (serial queue) — safe.
+    // MARK: - Asset writer
 
     nonisolated(unsafe) private var assetWriter: AVAssetWriter?
     nonisolated(unsafe) private var videoWriterInput: AVAssetWriterInput?
@@ -55,7 +52,6 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var isRecording = false
     @Published var lastVideoURL: URL?
 
-    /// Nonisolated mirror of isRecording for use on the data-output queue.
     nonisolated(unsafe) private var isRecordingFlag = false
 
     @Published var actionModeEnabled = false {
@@ -64,21 +60,15 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: - Roll provider
 
-    /// Read on every video frame — must be nonisolated(unsafe) so the
-    /// data-output queue can call it without actor-hop overhead.
     nonisolated(unsafe) var rollProvider: () -> Double = { 0.0 }
 
     // MARK: - Preview frame handler
-
-    /// Called on the data-output queue with every processed frame (rotate + roll-crop),
-    /// regardless of whether recording is active. CameraPreview2 sets this to render
-    /// a live preview of exactly the crop region that will be recorded.
+    /// Receives every processed (rotated + roll-cropped) CIImage on the data-output queue,
+    /// regardless of whether recording is active. Set by CameraPreview2 to drive its display.
     nonisolated(unsafe) var previewFrameHandler: ((CIImage) -> Void)? = nil
 
-    // ── Crop geometry constants ────────────────────────────────────────
-    // Must match HorizonRectangleView sizing.
-    // For a 3:4 rect whose diagonal fits inside the shorter sensor dimension
-    // with a 10% inset: W = min(sensorW,sensorH) × 3/5 × 0.90
+    // MARK: - Crop geometry constants
+
     private let cropFraction: Double = 3.0 / 5.0 * 0.90
     private let cropAspectW: Double = 3.0
     private let cropAspectH: Double = 4.0
@@ -110,7 +100,7 @@ final class CameraManager: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if !self.isConfigured { self.configureSession() }
-            if !self.session.isRunning  { self.session.startRunning() }
+            if !self.session.isRunning { self.session.startRunning() }
         }
     }
 
@@ -129,14 +119,12 @@ final class CameraManager: NSObject, ObservableObject {
         session.sessionPreset = .inputPriority
         defer { session.commitConfiguration(); isConfigured = true }
 
-        // ── Video input ───────────────────────────────────────────────
         guard let device = selectVideoDevice(for: cameraType, position: .back),
               let input  = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else { return }
         session.addInput(input)
         videoDeviceInput = input
 
-        // Continuous AF / AE
         try? device.lockForConfiguration()
         if device.isFocusModeSupported(.continuousAutoFocus) {
             device.focusMode = .continuousAutoFocus
@@ -148,7 +136,6 @@ final class CameraManager: NSObject, ObservableObject {
 
         enforceFourByThreeAndMinZoom()
 
-        // ── Audio input ───────────────────────────────────────────────
         if let mic = AVCaptureDevice.default(for: .audio),
            let micInput = try? AVCaptureDeviceInput(device: mic),
            session.canAddInput(micInput) {
@@ -156,7 +143,6 @@ final class CameraManager: NSObject, ObservableObject {
             audioDeviceInput = micInput
         }
 
-        // ── Video data output ─────────────────────────────────────────
         videoDataOutput.alwaysDiscardsLateVideoFrames = false
         videoDataOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -165,7 +151,6 @@ final class CameraManager: NSObject, ObservableObject {
         guard session.canAddOutput(videoDataOutput) else { return }
         session.addOutput(videoDataOutput)
 
-        // ── Audio data output ─────────────────────────────────────────
         audioDataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
         if session.canAddOutput(audioDataOutput) {
             session.addOutput(audioDataOutput)
@@ -277,24 +262,17 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Recording  ─────────────────────────────────────────────────
+    // MARK: - Recording
 
     func toggleRecording() {
-        // Use isRecordingFlag (nonisolated) — safe to call from any queue/actor.
         if isRecordingFlag {
             dataOutputQueue.async { self.stopRecording() }
         } else {
-            // videoDeviceInput lives on sessionQueue — read it there, then
-            // arm the writer on dataOutputQueue.
             sessionQueue.async {
                 guard let device = self.videoDeviceInput?.device else {
                     print("toggleRecording: no videoDeviceInput"); return
                 }
-                let dims = CMVideoFormatDescriptionGetDimensions(
-                    device.activeFormat.formatDescription)
-                // Sensor is landscape, e.g. 4032×3024.
-                // After .oriented(.right) the frame becomes portrait: W=3024, H=4032.
-                // min(W,H) == 3024 → use that as "shorter".
+                let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
                 let sensorShort = Double(min(dims.width, dims.height))
                 let cropW_d = sensorShort * self.cropFraction
                 let cropH_d = cropW_d * (self.cropAspectH / self.cropAspectW)
@@ -330,7 +308,7 @@ final class CameraManager: NSObject, ObservableObject {
         ]
         let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vInput.expectsMediaDataInRealTime = true
-        vInput.transform = .identity  // CIImage pipeline handles orientation
+        vInput.transform = .identity
 
         let adaptorAttrs: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -381,31 +359,17 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Frame processing  ──────────────────────────────────────────
+    // MARK: - Frame processing
 
     nonisolated private func processVideoFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard let writer  = assetWriter,
-              let vInput  = videoWriterInput,
-              let adaptor = pixelBufferAdaptor,
-              writer.status == .writing,
-              vInput.isReadyForMoreMediaData else { return }
-
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        if !sessionAtSourceTime {
-            writer.startSession(atSourceTime: pts)
-            sessionAtSourceTime = true
-        }
-
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // ── Step 1: rotate sensor frame to portrait ───────────────────
-        // Back camera delivers landscape buffers; .right = 90° CW → portrait.
+        // Step 1: rotate sensor frame to portrait
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
         let pW: CGFloat = ciImage.extent.width
         let pH: CGFloat = ciImage.extent.height
 
-        // ── Step 2: counter-rotate by -roll around centre ─────────────
+        // Step 2: counter-rotate by -roll around centre
         let angle = CGFloat(-rollProvider())
         let cx: CGFloat = pW / 2
         let cy: CGFloat = pH / 2
@@ -415,7 +379,7 @@ final class CameraManager: NSObject, ObservableObject {
             .concatenating(CGAffineTransform(translationX:  cx, y:  cy))
         let rotated = ciImage.transformed(by: centreRotation)
 
-        // ── Step 3: centre-crop to 3:4 portrait rect ─────────────────
+        // Step 3: centre-crop to 3:4 portrait rect
         let shorter: CGFloat = min(pW, pH)
         let cropW: CGFloat   = shorter * CGFloat(cropFraction)
         let cropH: CGFloat   = cropW   * CGFloat(cropAspectH / cropAspectW)
@@ -432,7 +396,23 @@ final class CameraManager: NSObject, ObservableObject {
             .transformed(by: CGAffineTransform(translationX: -cropRect.minX,
                                                y:            -cropRect.minY))
 
-        // ── Step 4: render to pixel buffer and write ──────────────────
+        // Always: send processed frame to live preview handler
+        previewFrameHandler?(cropped)
+
+        // Step 4: write to file (only when recording)
+        guard let writer  = assetWriter,
+              let vInput  = videoWriterInput,
+              let adaptor = pixelBufferAdaptor,
+              writer.status == .writing,
+              vInput.isReadyForMoreMediaData else { return }
+
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+        if !sessionAtSourceTime {
+            writer.startSession(atSourceTime: pts)
+            sessionAtSourceTime = true
+        }
+
         guard let pool = adaptor.pixelBufferPool else { return }
         var outBuffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outBuffer) == kCVReturnSuccess,
@@ -478,7 +458,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate,
                                    didOutput sampleBuffer: CMSampleBuffer,
                                    from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
-            guard isRecordingFlag else { return }
+            // Always process every video frame — preview needs them even when not recording.
             processVideoFrame(sampleBuffer)
         } else if output is AVCaptureAudioDataOutput {
             guard isRecordingFlag,

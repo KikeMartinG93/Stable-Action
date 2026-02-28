@@ -2,150 +2,151 @@
 //  CameraPreview2.swift
 //  Stable Action
 //
-//  A horizon-locked camera preview that shows exactly the crop region
-//  the CameraManager records — a 3:4 portrait rect that stays level
-//  with the horizon as the phone rolls.
+//  Displays a live preview of the exact crop region that CameraManager records:
+//    • Sensor frame rotated to portrait  (.oriented(.right))
+//    • Counter-rotated by -roll          (horizon stabilisation)
+//    • Centre-cropped to 3:4 rect        (cropFraction = 3/5 × 0.90)
 //
-//  Crop geometry (must stay in sync with CameraManager):
-//    cropFraction  = 3/5 × 0.90
-//    aspect        = 3 wide : 4 tall
-//    The rect is sized so its diagonal fits the shorter screen dimension
-//    with a 10 % inset, matching HorizonRectangleView.
+//  The processed CIImage is delivered by CameraManager.previewFrameHandler
+//  (on the data-output queue) and rendered into an MTKView every frame.
 //
 
 import SwiftUI
-import AVFoundation
+import MetalKit
+import CoreImage
 
-// MARK: - UIView
+// MARK: - Metal renderer
 
-/// A UIView that hosts an AVCaptureVideoPreviewLayer, counter-rotates it
-/// by the current device roll, and clips to the crop rectangle — giving a
-/// live preview that matches the recorded video pixel-for-pixel.
-final class HorizonCropPreviewView: UIView {
+/// MTKView subclass that draws CIImages sent from the CameraManager pipeline.
+final class CropPreviewMTKView: MTKView {
 
-    // ── Constants (mirror CameraManager) ──────────────────────────────
-    private let cropFraction: CGFloat = 3.0 / 5.0 * 0.90
-    private let cropAspectW:  CGFloat = 3.0
-    private let cropAspectH:  CGFloat = 4.0
+    private let ciContext: CIContext
+    private var latestImage: CIImage?
+    private let renderLock = NSLock()
 
-    // ── Sub-layers ─────────────────────────────────────────────────────
-    /// Container whose transform is the counter-rotation.
-    private let rotatingContainer = CALayer()
-    /// The actual camera feed.
-    private let previewLayer = AVCaptureVideoPreviewLayer()
-
-
-
-    // MARK: Init
-
-    init(session: AVCaptureSession) {
-        super.init(frame: .zero)
-        backgroundColor = .black
-        clipsToBounds = true                 // hard crop to the SwiftUI frame
-
-        // Preview layer fills the rotating container.
-        previewLayer.session     = session
-        previewLayer.videoGravity = .resizeAspectFill
-
-        rotatingContainer.addSublayer(previewLayer)
-        layer.addSublayer(rotatingContainer)
+    override init(frame: CGRect, device: MTLDevice?) {
+        let dev = device ?? MTLCreateSystemDefaultDevice()!
+        ciContext = CIContext(mtlDevice: dev,
+                              options: [.useSoftwareRenderer: false,
+                                        .workingColorSpace: CGColorSpaceCreateDeviceRGB() as Any])
+        super.init(frame: frame, device: dev)
+        framebufferOnly  = false          // needed so CIContext can render into it
+        enableSetNeedsDisplay = false      // drive via setNeedsDisplay calls
+        isPaused         = true           // we'll trigger draws manually
+        backgroundColor  = .black
+        contentScaleFactor = UIScreen.main.scale
+        autoResizeDrawable = true
+        delegate = nil                    // we override draw() directly
     }
 
-    required init?(coder: NSCoder) { fatalError() }
+    required init(coder: NSCoder) { fatalError() }
 
-    // MARK: Layout
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        let cW = bounds.width
-        let cH = bounds.height
-        let cx = cW / 2
-        let cy = cH / 2
-
-        // ── 1. Crop rect size (portrait 3:4, diagonal = shorter × 0.90) ──
-        // This exactly matches HorizonRectangleView & CameraManager maths.
-        let shorter = min(cW, cH)
-        let cropW   = shorter * cropFraction              // same as rectW in HorizonRectangleView
-        let cropH   = cropW * (cropAspectH / cropAspectW)
-
-        // ── 2. The preview layer must cover the crop rect even after the
-        //       largest expected rotation.  Worst-case is 45° → expand by √2.
-        //       Using 1.5× is safe and matches typical tilt angles.
-        let expand:  CGFloat = 1.5
-        let layerW = cropW * expand
-        let layerH = cropH * expand
-
-        // ── 3. Position rotatingContainer centred in this view ───────────
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        rotatingContainer.bounds   = CGRect(x: 0, y: 0, width: layerW, height: layerH)
-        rotatingContainer.position = CGPoint(x: cx, y: cy)
-        previewLayer.frame         = rotatingContainer.bounds
-        CATransaction.commit()
-
-        updateLayout()
+    /// Called from CameraManager.previewFrameHandler (data-output queue).
+    func enqueue(_ image: CIImage) {
+        renderLock.lock()
+        latestImage = image
+        renderLock.unlock()
+        // Trigger a draw on the main thread.
+        DispatchQueue.main.async { [weak self] in self?.draw() }
     }
 
-    // MARK: Layout (extracted so it can be called without rotation)
+    override func draw(_ rect: CGRect) {
+        renderLock.lock()
+        let image = latestImage
+        renderLock.unlock()
+        guard let image,
+              let commandQueue = device?.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let drawable = currentDrawable else { return }
 
-    private func updateLayout() {
-        // No additional layout adjustments needed — static preview, no rotation.
+        let drawableSize = CGSize(width: drawableSize.width, height: drawableSize.height)
+
+        // Scale CIImage to fill the drawable, letterbox/pillarbox preserving aspect.
+        let imgW = image.extent.width
+        let imgH = image.extent.height
+        let scaleX = drawableSize.width  / imgW
+        let scaleY = drawableSize.height / imgH
+        let scale  = min(scaleX, scaleY)          // aspect-fit
+
+        let scaledW = imgW * scale
+        let scaledH = imgH * scale
+        let tx = (drawableSize.width  - scaledW) / 2
+        let ty = (drawableSize.height - scaledH) / 2
+
+        let transform = CGAffineTransform(scaleX: scale, y: scale)
+            .translatedBy(x: tx / scale, y: ty / scale)
+        let displayed = image.transformed(by: transform)
+
+        let renderDestination = CIRenderDestination(
+            width:  Int(drawableSize.width),
+            height: Int(drawableSize.height),
+            pixelFormat: colorPixelFormat,
+            commandBuffer: commandBuffer
+        ) { [weak drawable] in drawable!.texture }
+
+        renderDestination.isFlipped = false
+
+        // Clear to black then composite the image.
+        try? ciContext.startTask(toClear: renderDestination)
+        try? ciContext.startTask(toRender: displayed, to: renderDestination)
+
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
     }
 }
 
 // MARK: - SwiftUI wrapper
 
-/// Drop-in SwiftUI view.  Pass the same `session` and `motion` objects
-/// used by the rest of the app.
+/// Drop-in SwiftUI view.
+/// Pass the `camera: CameraManager` — the view wires itself to
+/// `camera.previewFrameHandler` in `makeUIView` and tears down in `dismantleUIView`.
 struct CameraPreview2: UIViewRepresentable {
 
-    let session:  AVCaptureSession
-    /// Optional tap-to-focus callback (viewPoint, devicePoint).
+    let camera: CameraManager
     var onTap: ((CGPoint, CGPoint) -> Void)? = nil
-
-    // ── Constants (mirror CameraManager) ─────────────────────────────
-    private let cropFraction: CGFloat = 3.0 / 5.0 * 0.90
-    private let cropAspectH:  CGFloat = 4.0
-    private let cropAspectW:  CGFloat = 3.0
 
     func makeCoordinator() -> Coordinator { Coordinator(onTap: onTap) }
 
-    func makeUIView(context: Context) -> HorizonCropPreviewView {
-        let view = HorizonCropPreviewView(session: session)
+    func makeUIView(context: Context) -> CropPreviewMTKView {
+        let view = CropPreviewMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
 
         // Tap-to-focus
         let tap = UITapGestureRecognizer(target: context.coordinator,
                                          action: #selector(Coordinator.handleTap(_:)))
         view.addGestureRecognizer(tap)
-        context.coordinator.previewView = view
+        context.coordinator.view = view
+
+        // Subscribe to processed frames from CameraManager
+        camera.previewFrameHandler = { [weak view] ciImage in
+            view?.enqueue(ciImage)
+        }
 
         return view
     }
 
-    func updateUIView(_ uiView: HorizonCropPreviewView, context: Context) {
+    func updateUIView(_ uiView: CropPreviewMTKView, context: Context) {
         context.coordinator.onTap = onTap
+    }
+
+    static func dismantleUIView(_ uiView: CropPreviewMTKView, coordinator: Coordinator) {
+        // Nothing needed — CameraManager owns the handler, will be replaced or nilled on stop.
     }
 
     // MARK: - Coordinator
 
     final class Coordinator: NSObject {
         var onTap: ((CGPoint, CGPoint) -> Void)?
-        weak var previewView: HorizonCropPreviewView?
+        weak var view: CropPreviewMTKView?
 
         init(onTap: ((CGPoint, CGPoint) -> Void)?) { self.onTap = onTap }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let view = previewView else { return }
-            let vp = gesture.location(in: view)
-            // For device-point conversion we use the inner previewLayer.
-            // Access it via the rotating container's first sublayer.
-            if let pl = view.layer.sublayers?.first?.sublayers?.first as? AVCaptureVideoPreviewLayer {
-                let dp = pl.captureDevicePointConverted(fromLayerPoint: vp)
-                onTap?(vp, dp)
-            } else {
-                onTap?(vp, CGPoint(x: 0.5, y: 0.5))
-            }
+            guard let view else { return }
+            let pt = gesture.location(in: view)
+            // Normalise to 0–1 device coordinates (centre = 0.5, 0.5)
+            let dp = CGPoint(x: pt.x / view.bounds.width,
+                             y: pt.y / view.bounds.height)
+            onTap?(pt, dp)
         }
     }
 }
