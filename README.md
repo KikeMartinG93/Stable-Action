@@ -1,12 +1,32 @@
-# Stable Action
+<p align="center">
+  <img src="icon.png" width="120" alt="Stable Action app icon" />
+</p>
 
-**Samsung Super Steady Horizon Lock - rebuilt for iPhone.**
+<h1 align="center">Stable Action</h1>
 
-Samsung's Galaxy S25 Ultra ships a feature called Super Steady with Horizon Lock that keeps your footage perfectly level no matter how much you tilt or shake the phone. It's one of the most impressive stabilisation tricks in mobile cameras right now - and it's exclusive to Android.
+<p align="center">
+  <strong>Samsung Super Steady Horizon Lock - rebuilt for iPhone.</strong><br/>
+  Samsung's Galaxy S25 Ultra has it. Now iOS does too.
+</p>
 
-Stable Action brings that exact same experience to iOS. Point it at anything, tilt your wrist, run, jump, ride - the horizon stays locked flat, just like on the S25 Ultra.
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-iOS%2016%2B-black?style=flat-square&logo=apple" />
+  <img src="https://img.shields.io/badge/Language-Swift-orange?style=flat-square&logo=swift" />
+  <img src="https://img.shields.io/badge/Mode-Action%20%7C%20Normal-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/Stabilisation-Horizon%20Lock-green?style=flat-square" />
+</p>
 
-![Stable Action demo](demo.gif)
+<p align="center">
+  <img src="demo.gif" width="340" alt="Stable Action demo" />
+</p>
+
+---
+
+## Overview
+
+Samsung's Galaxy S25 Ultra ships a feature called **Super Steady with Horizon Lock** that keeps your footage perfectly level no matter how much you tilt or shake the phone. It's one of the most impressive stabilisation tricks in mobile cameras right now - and it was exclusive to Android.
+
+**Stable Action brings that exact same experience to iOS.** Point it at anything, tilt your wrist, run, jump, ride - the horizon stays locked flat, just like on the S25 Ultra. Built entirely in native Swift, runs 100% on-device, no subscriptions, no cloud.
 
 ---
 
@@ -14,97 +34,93 @@ Stable Action brings that exact same experience to iOS. Point it at anything, ti
 
 The Galaxy S25 Ultra's Horizon Lock works by cropping into the sensor and counter-rotating that crop window against the phone's tilt in real time. The result is a video where the horizon never moves, even when the phone is spinning in your hand.
 
-Stable Action replicates this on iPhone using the exact same principle - gyroscope-driven counter-rotation, a floating crop window inside a larger sensor buffer, and hardware ISP stabilisation layered on top. The implementation is native Swift, runs entirely on-device, and adds translation correction (up/down/left/right drift) that Samsung's version doesn't publicly advertise.
+Stable Action replicates this using the exact same principle - gyroscope-driven counter-rotation, a floating crop window inside a larger sensor buffer, and hardware ISP stabilisation layered on top. It also adds **translation correction** (up/down/left/right drift compensation) that Samsung's version doesn't publicly advertise.
 
 ---
 
-## What problem does it solve?
+## Features
 
-When you're filming action - running, cycling, skiing, handheld on a boat - your phone naturally tilts and rolls with your body. Normal camera apps just record that tilt. Stable Action watches the phone's orientation 120 times per second and counteracts it, so the output always looks like you were holding the phone perfectly straight.
-
-Think of it as a virtual gimbal built into the software.
-
----
-
-## How it works (the idea, not the code)
-
-### 1. The horizon rectangle
-
-When you open the app in Action Mode, you're not seeing the full camera frame. You're looking through a cropped 3:4 portrait window floating in the middle of the sensor. That window is intentionally smaller than the actual sensor output - the surrounding space is the buffer the stabilisation uses to move without hitting the edge of the frame.
-
-Picture it like a picture frame floating inside a larger canvas. When the canvas tilts, the frame stays upright.
-
-### 2. The gyroscope does the heavy lifting
-
-Two corrections happen simultaneously, every single frame:
-
-**Roll correction** - if you tilt the phone sideways, the crop window rotates the opposite direction by the exact same amount. The two cancel out and the horizon stays flat. This is the core of what Samsung calls Horizon Lock.
-
-**Translation correction** - if your hand jerks left, right, up, or down, the crop window slides in the opposite direction to compensate. The accelerometer detects the lateral movement, integrates it into a velocity, and shifts the crop window against it. When the movement stops the window drifts back to centre on its own.
-
-### 3. What you record is what you see
-
-The preview on screen and the recorded video go through the exact same processing pipeline. What you see in the viewfinder is exactly what gets written to disk - no post-processing, no surprises.
-
-### 4. Hardware stabilisation on top
-
-On top of the gyroscope corrections, Stable Action also engages the iPhone's built-in ISP stabilisation. This handles micro-jitter - hand tremor, footstep impact, engine vibration - that the gyroscope-based corrections aren't designed for. The two layers stack: hardware cleans up the small stuff, software handles the big roll.
-
-### 5. Normal vs Action Mode
-
-- **Normal mode** - plain full-frame camera view, no crop, standard stabilisation. Looks and feels like the native Camera app.
-- **Action mode** - the full Samsung-style Horizon Lock pipeline kicks in. Gyroscope roll correction, translation correction, and the most aggressive hardware stabilisation your device supports.
+| | Feature | Details |
+|---|---|---|
+| 🎯 | **Horizon Lock** | Gyroscope-driven crop counter-rotation at 120 Hz |
+| 📐 | **Translation Correction** | Accelerometer-based X/Y drift stabilisation |
+| 🔧 | **Hardware Stabilisation** | ISP `.cinematicExtendedEnhanced` in Action Mode |
+| 👁 | **Preview = Recording** | Same pipeline for both - no surprises |
+| 📷 | **Normal Mode** | Full-frame, no crop, standard camera feel |
+| 🎬 | **Action Mode** | Full Horizon Lock + translation + aggressive ISP |
+| 🎯 | **Tap to Focus** | Lock focus and exposure to any point on screen |
+| 💾 | **Auto Save** | Saves to Photos library automatically on stop |
 
 ---
 
-## Basic usage
+## How it works
 
-1. Open the app - camera starts immediately in Normal mode.
-2. Toggle **Action Mode** on at the bottom to enable Horizon Lock stabilisation.
-3. The viewfinder switches to the stabilised crop view. Tilt the phone - the horizon stays flat.
-4. Tap anywhere on screen to lock focus and exposure to that spot.
-5. Hit the red button to record. A **REC** indicator pulses at the top.
-6. Hit it again to stop - the clip saves to Photos automatically.
-7. Tap the thumbnail in the bottom-left to play back your last clip without leaving the app.
+### The horizon rectangle
+
+In Action Mode you're not seeing the full sensor frame. You're looking through a cropped **3:4 portrait window** floating in the middle of the sensor output. That window is intentionally smaller than the full frame - the surrounding space is the buffer the stabilisation uses to rotate and shift without ever hitting the edge.
+
+Picture a picture frame floating inside a larger canvas. When the canvas tilts, the frame stays upright.
+
+### Two corrections, every frame
+
+**Roll correction** - the phone tilts, the crop window rotates the opposite direction by the exact same amount. They cancel out. The horizon stays flat. This is the core of what Samsung calls Horizon Lock.
+
+**Translation correction** - the phone jerks sideways or up/down, the crop window slides the opposite way to compensate. The accelerometer detects the movement, integrates it into a velocity, and shifts the window against it. When movement stops, the window drifts back to centre automatically.
+
+### Hardware on top
+
+Stable Action also engages the iPhone's built-in ISP stabilisation on every frame. Hardware cleans up micro-jitter - hand tremor, footstep impact, engine vibration. Software handles the macro roll. The two layers stack.
+
+### Normal vs Action Mode
+
+| | Normal Mode | Action Mode |
+|---|---|---|
+| **Preview** | Full sensor frame | Stabilised 3:4 crop |
+| **Roll correction** | ✗ | ✓ |
+| **Translation correction** | ✗ | ✓ |
+| **Hardware ISP** | `.auto` | `.cinematicExtendedEnhanced` |
+| **Recorded area** | Full frame | Stabilised crop only |
 
 ---
 
-## Things worth knowing
+## Usage
 
-- **Action Mode always records 3:4 portrait video.** The crop is what gives stabilisation room to work - it is not a bug.
-- **Normal Mode records the full sensor frame** with no crop and no roll correction.
-- **Stabilisation is always on in Action Mode.** There is no way to accidentally shoot unstabilised footage once the toggle is on.
-- **Requires a real iPhone.** Camera and gyroscope are not available in the Simulator.
-- **Videos save to Photos automatically** the moment you stop recording.
+```
+1. Open the app                    → camera starts in Normal mode
+2. Toggle Action Mode              → Horizon Lock pipeline activates
+3. Tilt the phone                  → horizon stays locked flat
+4. Tap anywhere                    → locks focus + exposure to that spot
+5. Press the red button            → starts recording (REC pulses at top)
+6. Press again                     → stops, saves to Photos automatically
+7. Tap the thumbnail (bottom-left) → plays back the last clip in-app
+```
 
 ---
 
-## Permissions needed
+## Requirements
+
+- iPhone with iOS 16 or later
+- iOS 18 or later for best Action Mode stabilisation
+- Physical device required - camera and gyroscope unavailable in Simulator
+
+---
+
+## Permissions
 
 | Permission | Why |
 |---|---|
-| Camera | To capture video |
-| Microphone | To record audio alongside video |
-| Photos | To save finished clips to your library |
-
----
-
-## Who is this for?
-
-Anyone who wants Samsung Galaxy-level Horizon Lock stabilisation on their iPhone, without buying an Android phone. Particularly useful for:
-
-- Sports and action footage (skiing, skating, running, cycling)
-- Vlogging while walking
-- Filming from a moving vehicle
-- Any situation where your hands or body are naturally moving while you shoot
+| **Camera** | To capture video |
+| **Microphone** | To record audio alongside video |
+| **Photos** | To save finished clips to your library |
 
 ---
 
 ## Credits
 
-Designed and built by **[Rudra Shah](https://rudrahsha.in)**.
+Designed and built by **[Rudra Shah](https://rudrahsha.in)**
 
 ---
 
-*Built for iPhone. Requires iOS 16 or later. iOS 18 or later recommended for best Action Mode performance.*
-*Built for iPhone. Requires iOS 16 or later for full stabilisation features; iOS 18 or later recommended for the best Action Mode performance.*
+<p align="center">
+  <sub>Built for iPhone · Inspired by Samsung Galaxy S25 Ultra Super Steady Horizon Lock</sub>
+</p>
