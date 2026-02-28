@@ -10,9 +10,13 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Build App
+      - name: Show Project Info
         run: |
-          xcodebuild -scheme App \
-          -configuration Release \
-          -sdk iphoneos \
-          build
+          echo "Listing files..."
+          ls
+          echo "Searching Xcode projects..."
+          find . -name "*.xcodeproj"
+          find . -name "*.xcworkspace"
+
+      - name: List Schemes
+        run: xcodebuild -list
