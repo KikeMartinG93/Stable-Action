@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Build Archive (No Signing)
+      - name: Build App (No Archive)
         run: |
           xcodebuild \
           -scheme "Stable Action" \
@@ -18,14 +18,16 @@ jobs:
           -sdk iphoneos \
           CODE_SIGNING_ALLOWED=NO \
           CODE_SIGNING_REQUIRED=NO \
-          -archivePath build/StableAction.xcarchive \
-          archive
+          build
 
-      - name: Create IPA
+      - name: Find App
         run: |
           mkdir Payload
-          cp -r build/StableAction.xcarchive/Products/Applications/*.app Payload/
-          zip -r StableAction.ipa Payload
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "*.app" | head -n 1)
+          cp -r "$APP_PATH" Payload/
+
+      - name: Create IPA
+        run: zip -r StableAction.ipa Payload
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
