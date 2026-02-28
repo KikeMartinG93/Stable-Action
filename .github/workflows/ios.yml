@@ -10,25 +10,25 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Build Archive
+      - name: Build Archive (No Signing)
         run: |
           xcodebuild \
           -scheme "Stable Action" \
           -configuration Release \
           -sdk iphoneos \
+          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGNING_REQUIRED=NO \
           -archivePath build/StableAction.xcarchive \
           archive
 
-      - name: Export IPA
+      - name: Create IPA
         run: |
-          mkdir -p build/ipa
-          xcodebuild -exportArchive \
-          -archivePath build/StableAction.xcarchive \
-          -exportPath build/ipa \
-          -exportOptionsPlist ExportOptions.plist || true
+          mkdir Payload
+          cp -r build/StableAction.xcarchive/Products/Applications/*.app Payload/
+          zip -r StableAction.ipa Payload
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: IPA
-          path: build
+          name: StableAction-IPA
+          path: StableAction.ipa
