@@ -84,7 +84,7 @@ final class CropPreviewMTKView: MTKView {
             commandBuffer: commandBuffer
         ) { [weak drawable] in drawable!.texture }
 
-        renderDestination.isFlipped = false
+        renderDestination.isFlipped = true
 
         // Clear to black then composite the image.
         try? ciContext.startTask(toClear: renderDestination)
