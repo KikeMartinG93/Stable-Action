@@ -2,6 +2,8 @@
 
 A camera app for iPhone that keeps your shot level no matter how much you tilt your phone. Point it at something, roll your wrist, and the footage stays perfectly upright — like the horizon is locked in place.
 
+![Stable Action demo](demo.gif)
+
 ---
 
 ## What problem does it solve?
