@@ -22,9 +22,13 @@ Picture it like a picture frame floating inside a larger canvas. When the canvas
 
 ### 2. The gyroscope does the heavy lifting
 
-Your iPhone has a gyroscope that reports exactly how much the phone is rolled at any given moment — dozens of times per second. Stable Action reads this continuously and uses the number to rotate the crop window in the opposite direction by the same amount.
+Your iPhone has a gyroscope and an accelerometer that Stable Action reads continuously — 120 times per second. Two separate things are tracked at once:
 
-So if you tilt the phone 15° clockwise, the crop window tilts 15° counter-clockwise. The two cancel each other out. What lands in the recording is always level.
+**Roll correction** — if you tilt the phone sideways, the crop window tilts the opposite direction by the exact same amount. The two cancel each other out and the horizon stays flat.
+
+**Translation correction** — if your hand jerks left, right, up, or down, the crop window slides in the opposite direction to compensate. The phone's accelerometer detects that lateral movement, integrates it into a velocity, and shifts the crop window against it. When the movement stops, the window gently drifts back to centre on its own.
+
+So if you tilt the phone 15° clockwise AND take a step to the left, the crop rotates 15° counter-clockwise AND shifts right — both corrections happen simultaneously, every frame.
 
 ### 3. What you record is what you see
 

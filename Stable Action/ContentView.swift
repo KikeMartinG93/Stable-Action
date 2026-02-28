@@ -1,4 +1,4 @@
-
+//
 //  ContentView.swift
 //  Stable Action
 //
@@ -14,7 +14,7 @@ struct ContentView: View {
     @State private var showingPlayer = false
     @State private var focusPoint: CGPoint? = nil
     @State private var focusVisible = false
-    @State private var focusID = UUID()          // changes each tap → re-triggers onAppear
+    @State private var focusID = UUID()
 
     var body: some View {
         ZStack {
@@ -31,17 +31,13 @@ struct ContentView: View {
                         camera.focusAt(point: devicePoint)
                     }
 
-                        // Overlays stay on top
-                        if focusVisible, let pt = focusPoint {
-                            FocusSquare(onFinished: { focusVisible = false })
-                                .id(focusID)
-                                .position(pt)
-                                .allowsHitTesting(false)
-                        }
-                        
-                    //TODO: IF YOU WANT TO SEE ROLL-BASED HORIZON LINE, UNCOMMENT THIS (BELOW)
-//                      HorizonRectangleView(motion: motion)
-//                            .allowsHitTesting(false)
+                    // Overlays stay on top
+                    if focusVisible, let pt = focusPoint {
+                        FocusSquare(onFinished: { focusVisible = false })
+                            .id(focusID)
+                            .position(pt)
+                            .allowsHitTesting(false)
+                    }
 
                     // Recording indicator
                     if camera.isRecording {
@@ -72,16 +68,10 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .animation(.easeInOut(duration: 0.25), value: camera.isRecording)
-                    
-                    
-                    
 
-                // ── Bottom controls ────────────────────────────────────────
+                // Bottom controls
                 VStack(spacing: 16) {
-
-                    // Row: thumbnail | record | spacer
                     HStack {
-                        // Video thumbnail — tap to play
                         Button {
                             if camera.lastVideoURL != nil { showingPlayer = true }
                         } label: {
@@ -96,27 +86,23 @@ struct ContentView: View {
 
                         Spacer()
 
-                        // Record button
                         Button { camera.toggleRecording() } label: {
                             RecordButton(isRecording: camera.isRecording)
                         }
 
                         Spacer()
 
-                        // Right spacer mirror (keeps button centred)
                         Color.clear.frame(width: 54, height: 54)
                     }
                     .padding(.horizontal, 24)
 
-                    // ── Liquid-glass Action Mode toggle ────────────────────
                     LiquidGlassActionToggle(isOn: $camera.actionModeEnabled)
                         .padding(.horizontal, 32)
-
                 }
                 .padding(.vertical, 18)
             }
 
-            // ── Permission denied overlay ──────────────────────────────────
+            // Permission denied overlay
             if camera.permissionDenied {
                 VStack(spacing: 12) {
                     Text("Camera access required")
@@ -133,9 +119,11 @@ struct ContentView: View {
                 .padding()
             }
         }
-        .onAppear  {
-            // Give CameraManager access to live roll angle for crop recording
+        .onAppear {
             camera.rollProvider = { [weak motion] in motion?.roll ?? 0.0 }
+            camera.translationProvider = { [weak motion] in
+                (motion?.offsetX ?? 0.0, motion?.offsetY ?? 0.0)
+            }
             camera.start()
             motion.start()
         }
@@ -268,12 +256,10 @@ private struct FocusSquare: View {
 
     var body: some View {
         ZStack {
-            // Corner-bracket style (like native iOS Camera focus square)
             CornerBrackets(size: size, cornerLen: cornerLen, lineWidth: lineWidth)
                 .foregroundStyle(.yellow)
                 .opacity(lineOpacity)
 
-            // Subtle centre dot
             Circle()
                 .fill(.yellow.opacity(0.6))
                 .frame(width: 5, height: 5)
@@ -283,26 +269,14 @@ private struct FocusSquare: View {
         .scaleEffect(scale)
         .opacity(opacity)
         .onAppear {
-            // 1. Spring scale-in
-            withAnimation(.spring(response: 0.22, dampingFraction: 0.55)) {
-                scale = 1.0
-            }
-            // 2. After 0.9 s, fade the inner lines to half
-            withAnimation(.easeOut(duration: 0.25).delay(0.9)) {
-                lineOpacity = 0.45
-            }
-            // 3. After 1.4 s, fade everything out and notify
-            withAnimation(.easeOut(duration: 0.3).delay(1.4)) {
-                opacity = 0
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.75) {
-                onFinished?()
-            }
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.55)) { scale = 1.0 }
+            withAnimation(.easeOut(duration: 0.25).delay(0.9)) { lineOpacity = 0.45 }
+            withAnimation(.easeOut(duration: 0.3).delay(1.4)) { opacity = 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.75) { onFinished?() }
         }
     }
 }
 
-// Draws four L-shaped corner brackets
 private struct CornerBrackets: Shape {
     let size: CGFloat
     let cornerLen: CGFloat
@@ -312,27 +286,18 @@ private struct CornerBrackets: Shape {
         var p = Path()
         let r = rect
         let c = cornerLen
-
-        // Top-left
         p.move(to: CGPoint(x: r.minX, y: r.minY + c))
         p.addLine(to: CGPoint(x: r.minX, y: r.minY))
         p.addLine(to: CGPoint(x: r.minX + c, y: r.minY))
-
-        // Top-right
         p.move(to: CGPoint(x: r.maxX - c, y: r.minY))
         p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
         p.addLine(to: CGPoint(x: r.maxX, y: r.minY + c))
-
-        // Bottom-right
         p.move(to: CGPoint(x: r.maxX, y: r.maxY - c))
         p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
         p.addLine(to: CGPoint(x: r.maxX - c, y: r.maxY))
-
-        // Bottom-left
         p.move(to: CGPoint(x: r.minX + c, y: r.maxY))
         p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
         p.addLine(to: CGPoint(x: r.minX, y: r.maxY - c))
-
         return p
     }
 }
